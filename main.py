@@ -5,6 +5,9 @@ from datasets import load_dataset
 from openai import OpenAI
 import base64
 from io import BytesIO
+import json
+import time
+from pathlib import Path
 
 # Load environment variables
 load_dotenv()
@@ -22,7 +25,6 @@ dataset = load_dataset(
 products_df = pd.DataFrame(dataset)
 print(f"✓ Loaded {len(products_df)} products")
 
-# Function to encode PIL image to base64
 def encode_image(pil_image):
     """Convert PIL image to base64 string for API transmission."""
     buffer = BytesIO()
@@ -30,7 +32,6 @@ def encode_image(pil_image):
     buffer.seek(0)
     return base64.b64encode(buffer.read()).decode("utf-8")
 
-# Function to create product listing prompt
 def create_product_listing_prompt(product_name, price, category, additional_info=None):
     """Create a structured prompt for generating product listings."""
     prompt = f"""You are an expert e-commerce copywriter. Analyze the product image and create a compelling product listing.
@@ -56,24 +57,21 @@ Format your response as JSON with this exact structure:
     "keywords": "keyword1, keyword2"
 }}
 
-Be specific about what you see in the image. Mention colors, materials, 
+Be specific about what you see in the image. Mention colors, materials,
 design elements and distinctive features. Avoid generic descriptions."""
     return prompt
+
 def generate_product_listing(product_row, price=49.99):
     """Send image and metadata to GPT-4 Vision and get product listing."""
     try:
-        # Encode image
         encoded_image = encode_image(product_row["image"])
-        
-        # Create prompt
         prompt = create_product_listing_prompt(
             product_name=product_row["productDisplayName"],
             price=price,
             category=product_row["masterCategory"],
             additional_info=f"{product_row['baseColour']}, {product_row['season']}, {product_row['usage']}"
         )
-        
-        # Call GPT-4 Vision API
+
         response = client.chat.completions.create(
             model="gpt-4o",
             max_tokens=1000,
@@ -95,52 +93,73 @@ def generate_product_listing(product_row, price=49.99):
                 }
             ]
         )
-        
-        # Extract response text
+
         raw_response = response.choices[0].message.content
-        
-        # Parse JSON from response
-        import json
         clean_response = raw_response.strip()
+
         if "```json" in clean_response:
             clean_response = clean_response.split("```json")[1].split("```")[0].strip()
         elif "```" in clean_response:
             clean_response = clean_response.split("```")[1].split("```")[0].strip()
-        
+
         listing = json.loads(clean_response)
         return {"status": "success", "listing": listing}
 
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-# Test API call on first product
-print("\nGenerating listing for first product...")
-result = generate_product_listing(products_df.iloc[0])
+def process_multiple_products(df, num_products=3):
+    """Generate listings for multiple products and save results."""
+    results = []
+    total = min(num_products, len(df))
 
-if result["status"] == "success":
-    print("✓ Listing generated successfully")
-    print("\n--- GENERATED LISTING ---")
-    import json
-    print(json.dumps(result["listing"], indent=2))
-else:
-    print(f"✗ Error: {result['error']}")
+    print(f"\nProcessing {total} products...")
+    print("=" * 50)
 
+    for i in range(total):
+        product = df.iloc[i]
+        product_name = product["productDisplayName"]
 
-# Test encoding and prompt
-print("\nTesting image encoding...")
-test_image = products_df.iloc[0]["image"]
-encoded = encode_image(test_image)
-print(f"✓ Image encoded successfully")
-print(f"✓ Base64 string length: {len(encoded)} characters")
+        print(f"\n[{i+1}/{total}] Processing: {product_name}")
 
-# Test prompt
-test_product = products_df.iloc[0]
-test_prompt = create_product_listing_prompt(
-    product_name=test_product["productDisplayName"],
-    price=49.99,
-    category=test_product["masterCategory"],
-    additional_info=f"{test_product['baseColour']}, {test_product['season']}, {test_product['usage']}"
-)
+        result = generate_product_listing(product)
 
-print("\nPrompt preview:")
-print(test_prompt[:300] + "...")
+        if result["status"] == "success":
+            print(f"✓ Listing generated successfully")
+            results.append({
+                "id": int(product["id"]),
+                "product_name": product_name,
+                "category": product["masterCategory"],
+                "status": "success",
+                "listing": result["listing"]
+            })
+        else:
+            print(f"✗ Failed: {result['error']}")
+            results.append({
+                "id": int(product["id"]),
+                "product_name": product_name,
+                "category": product["masterCategory"],
+                "status": "error",
+                "error": result["error"]
+            })
+
+        if i < total - 1:
+            print("  Waiting 2 seconds before next request...")
+            time.sleep(2)
+
+    output_path = Path("outputs/product_listings.json")
+    output_path.parent.mkdir(exist_ok=True)
+
+    with open(output_path, "w") as f:
+        json.dump(results, f, indent=2)
+
+    print("\n" + "=" * 50)
+    print(f"✓ Processed {len(results)} products")
+    print(f"✓ Successful: {sum(1 for r in results if r['status'] == 'success')}")
+    print(f"✗ Failed: {sum(1 for r in results if r['status'] == 'error')}")
+    print(f"✓ Results saved to {output_path}")
+
+    return results
+
+# Run batch processing
+results = process_multiple_products(products_df, num_products=3)
